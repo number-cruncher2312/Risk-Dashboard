@@ -2,7 +2,7 @@
 
 
 
-**[View Live Application](([https://number-cruncher2312-risk-dashboard-app-pmzies.streamlit.app/]))**
+**[View Live Application](https://number-cruncher2312-risk-dashboard-app-pmzies.streamlit.app/)**
 ## Overview
 This application is a real-time risk analysis tool developed using Python and Streamlit. It integrates quantitative financial modeling with Large Language Model (LLM) inference to provide a dual-layer risk assessment for equity and cryptocurrency assets.
 
