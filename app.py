@@ -53,37 +53,57 @@ ticker = st.text_input("Enter Stock Ticker", value=default_ticker, placeholder="
 if ticker:
     # Only recalculate if ticker changed
     if st.session_state.cached_ticker != ticker:
+        # Quick validation first - check if ticker exists
+        test_data = yf.download(ticker, period="1d", progress=False)
+        if test_data.empty:
+            st.error(f"❌ Invalid ticker '{ticker}'. Please enter a valid stock symbol.")
+            st.session_state.cached_ticker = None
+            st.session_state.cached_metrics = None
+            st.stop()
+        
         with st.spinner("Fetching data and calculating metrics..."):
-            yearly_stock_data = yf.download(ticker, period="1y", progress=False)
+            try:
+                yearly_stock_data = yf.download(ticker, period="1y", progress=False)
 
-            returns= np.log(yearly_stock_data['Close']/yearly_stock_data['Close'].shift(1))
+                returns= np.log(yearly_stock_data['Close']/yearly_stock_data['Close'].shift(1))
 
-            var_cutoff = np.percentile(returns.dropna(), 5)
-            var = 100 * abs(var_cutoff)
+                var_cutoff = np.percentile(returns.dropna(), 5)
+                var = 100 * abs(var_cutoff)
 
-            bad_days = returns[returns <= var_cutoff].dropna()
-            cvar = 100 * abs(np.mean(bad_days))
+                bad_days = returns[returns <= var_cutoff].dropna()
+                cvar = 100 * abs(np.mean(bad_days))
 
-            daily_volatility = float(np.std(returns) * 100)
-            yearly_volatility = daily_volatility * np.sqrt(252)
-            
-            # Calculate drawdown
-            close_prices = yearly_stock_data['Close']
-            cumulative_max = close_prices.cummax()
-            drawdown = (close_prices - cumulative_max) / cumulative_max * 100
-            
-            # Cache the results
-            st.session_state.cached_ticker = ticker
-            st.session_state.cached_metrics = {
-                'yearly_volatility': yearly_volatility,
-                'var': var,
-                'cvar': cvar,
-                'drawdown': drawdown,
-                'max_drawdown': float(drawdown.min())
-            }
-            # Clear old analyses when ticker changes
-            st.session_state.deep_analysis = None
-            st.session_state.fast_analysis = None
+                daily_volatility = float(np.std(returns) * 100)
+                yearly_volatility = daily_volatility * np.sqrt(252)
+                
+                # Calculate drawdown
+                close_prices = yearly_stock_data['Close']
+                cumulative_max = close_prices.cummax()
+                drawdown = (close_prices - cumulative_max) / cumulative_max * 100
+                
+                # Cache the results
+                st.session_state.cached_ticker = ticker
+                st.session_state.cached_metrics = {
+                    'yearly_volatility': yearly_volatility,
+                    'var': var,
+                    'cvar': cvar,
+                    'drawdown': drawdown,
+                    'max_drawdown': float(drawdown.min())
+                }
+                # Clear old analyses when ticker changes
+                st.session_state.deep_analysis = None
+                st.session_state.fast_analysis = None
+                
+            except Exception as e:
+                st.error(f"❌ Error fetching data for '{ticker}': {str(e)}")
+                st.session_state.cached_ticker = None
+                st.session_state.cached_metrics = None
+                st.stop()
+    
+    # Check if we have valid cached metrics
+    if st.session_state.cached_metrics is None:
+        st.warning("⚠️ No data available. Please enter a valid ticker.")
+        st.stop()
     
     # Use cached metrics
     metrics = st.session_state.cached_metrics
@@ -182,7 +202,7 @@ if ticker:
     col4.metric("Max Drawdown", f"{max_drawdown:.2f}%")
 
     # Drawdown Chart
-    st.subheader(" Drawdown Chart")
+    st.subheader("  Drawdown Chart")
     drawdown_df = pd.DataFrame(drawdown)
     drawdown_df.columns = ['Drawdown (%)']
     st.area_chart(drawdown_df)
@@ -215,9 +235,13 @@ if ticker:
 
     if fast_clicked:
         with st.spinner("Generating fast AI analysis..."):
-            llm1 = ChatNVIDIA(model="deepseek-ai/deepseek-v3.1")
-            response = llm1.invoke(prompt_fast.format(ticker=ticker, annual_vol=yearly_volatility, var=var, cvar=cvar))
-            st.session_state.fast_analysis = response.content
+            try:
+                llm1 = ChatNVIDIA(model="deepseek-ai/deepseek-v3.1")
+                response = llm1.invoke(prompt_fast.format(ticker=ticker, annual_vol=yearly_volatility, var=var, cvar=cvar))
+                st.session_state.fast_analysis = response.content
+            except Exception as e:
+                st.error(f"❌ API Error: Unable to generate analysis. Please check your API key or try again later.\n\nDetails: {str(e)}")
+                st.session_state.fast_analysis = None
     
     if st.session_state.fast_analysis:
         st.write("### Fast AI Analysis")
