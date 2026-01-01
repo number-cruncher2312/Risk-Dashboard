@@ -26,6 +26,8 @@ if 'cached_ticker' not in st.session_state:
     st.session_state.cached_ticker = None
 if 'cached_metrics' not in st.session_state:
     st.session_state.cached_metrics = None
+if 'cached_returns' not in st.session_state:
+    st.session_state.cached_returns = None
 if 'selected_ticker' not in st.session_state:
     st.session_state.selected_ticker = ""
 
@@ -41,12 +43,89 @@ def get_sp500_tickers():
         return ["AAPL", "MSFT", "GOOGL"] # Fallback
 
 
+def calculate_volatility(returns):
+    """Calculate daily and annualized volatility"""
+    daily_volatility = float(np.std(returns) * 100)
+    yearly_volatility = daily_volatility * np.sqrt(252)
+    return daily_volatility, yearly_volatility
+
+
+def calculate_drawdown(close_prices):
+    """Calculate drawdown series and max drawdown"""
+    cumulative_max = close_prices.cummax()
+    drawdown = (close_prices - cumulative_max) / cumulative_max * 100
+    max_drawdown = float(drawdown.min())
+    return drawdown, max_drawdown
+
+
+def calculate_var_cvar_breach(returns, confidence_level):
+    """
+    Calculate VaR, CVaR, and breach rate for given confidence level
+    
+    Args:
+        returns: pandas Series of log returns
+        confidence_level: int (90, 95, or 99)
+    
+    Returns:
+        dict with var, cvar, breach_rate, var_cutoff
+    """
+    returns_clean = returns.dropna()
+    percentile = 100 - confidence_level
+    
+    # Historical VaR (percentile method)
+    var_cutoff = float(np.percentile(returns_clean, percentile))
+    var = 100 * abs(var_cutoff)
+    window = 60
+    window_returns = returns_clean[-window:]
+    var_last60_raw = np.percentile(window_returns, percentile)
+    
+    # Calculate CVaR BEFORE converting to percentage
+    bad_days = window_returns[window_returns <= var_last60_raw]
+    cvar_last60_raw = np.mean(bad_days) if len(bad_days) > 0 else var_last60_raw
+    
+    # Now convert to percentages
+    var_last60 = 100 * abs(float(var_last60_raw))
+    cvar_last60 = 100 * abs(float(cvar_last60_raw))
+    
+    rolling_vars = []
+    breaches = []
+
+    for i in range(window, len(returns_clean)):
+        history = returns_clean.iloc[i - window: i]
+        var_i = np.percentile(history, percentile)
+        today = returns_clean.iloc[i]
+        breached = today <= var_i
+        rolling_vars.append(var_i)
+        breaches.append(breached)
+    
+    breach_count = sum(breaches)
+    breach_rate = float((breach_count / len(breaches)) * 100) if len(breaches) > 0 else 0.0
+    
+    var = var_last60
+    cvar = cvar_last60
+    
+    return {
+        'var': float(var),
+        'cvar': float(cvar),
+        'breach_rate': float(breach_rate),
+        'var_cutoff': float(var_cutoff)
+    }
+
+
 
 st.title("Financial Risk Metrics Dashboard")
 
 # Use selected_ticker from sidebar if available
 default_ticker = st.session_state.selected_ticker if st.session_state.selected_ticker else ""
 ticker = st.text_input("Enter Stock Ticker", value=default_ticker, placeholder="e.g., AAPL, TSLA, MSFT")
+
+    # Confidence Level Selection
+confidence_level = st.radio(
+        "Confidence Level",
+        options=[90, 95, 99],
+        horizontal=True
+    )
+confx  = 100  - confidence_level
 
 
 
@@ -59,37 +138,32 @@ if ticker:
             st.error(f"❌ Invalid ticker '{ticker}'. Please enter a valid stock symbol.")
             st.session_state.cached_ticker = None
             st.session_state.cached_metrics = None
+            st.session_state.cached_returns = None
             st.stop()
         
         with st.spinner("Fetching data and calculating metrics..."):
             try:
                 yearly_stock_data = yf.download(ticker, period="1y", progress=False)
 
-                returns= np.log(yearly_stock_data['Close']/yearly_stock_data['Close'].shift(1))
+                returns = np.log(yearly_stock_data['Close']/yearly_stock_data['Close'].shift(1))
 
-                var_cutoff = np.percentile(returns.dropna(), 5)
-                var = 100 * abs(var_cutoff)
-
-                bad_days = returns[returns <= var_cutoff].dropna()
-                cvar = 100 * abs(np.mean(bad_days))
-
-                daily_volatility = float(np.std(returns) * 100)
-                yearly_volatility = daily_volatility * np.sqrt(252)
+                daily_volatility, yearly_volatility = calculate_volatility(returns)
                 
                 # Calculate drawdown
                 close_prices = yearly_stock_data['Close']
-                cumulative_max = close_prices.cummax()
-                drawdown = (close_prices - cumulative_max) / cumulative_max * 100
+                drawdown, max_drawdown = calculate_drawdown(close_prices)
                 
-                # Cache the results
+                # Cache the raw data for recalculation
                 st.session_state.cached_ticker = ticker
+                st.session_state.cached_returns = returns
+                st.session_state.cached_drawdown = drawdown
                 st.session_state.cached_metrics = {
                     'yearly_volatility': yearly_volatility,
-                    'var': var,
-                    'cvar': cvar,
                     'drawdown': drawdown,
-                    'max_drawdown': float(drawdown.min())
+                    'max_drawdown': max_drawdown
                 }
+
+                
                 # Clear old analyses when ticker changes
                 st.session_state.deep_analysis = None
                 st.session_state.fast_analysis = None
@@ -98,6 +172,7 @@ if ticker:
                 st.error(f"❌ Error fetching data for '{ticker}': {str(e)}")
                 st.session_state.cached_ticker = None
                 st.session_state.cached_metrics = None
+                st.session_state.cached_returns = None
                 st.stop()
     
     # Check if we have valid cached metrics
@@ -108,11 +183,33 @@ if ticker:
     # Use cached metrics
     metrics = st.session_state.cached_metrics
     yearly_volatility = metrics['yearly_volatility']
-    var = metrics['var']
-    cvar = metrics['cvar']
     drawdown = metrics['drawdown']
-    max_drawdown = metrics['max_drawdown'] 
+    max_drawdown = metrics['max_drawdown']
+    returns = st.session_state.cached_returns
+    
+    # Ensure returns is available
+    if returns is None:
+        st.error("⚠️ Error: Returns data not available. Please reload the ticker.")
+        st.stop()
+    
+    # Recalculate var, cvar, and breach rate based on confidence level
+    risk_metrics = calculate_var_cvar_breach(returns, confidence_level)
+    var = risk_metrics['var']
+    cvar = risk_metrics['cvar']
+    breach_rate = risk_metrics['breach_rate']
 
+    # Determine color based on breach rate vs expected
+    expected_breach_rate = confx
+    deviation = abs(breach_rate - expected_breach_rate)
+    
+    if deviation <= 1:  # Within 1% of expected
+        color = "green"
+    elif deviation <= 3:  # Within 3% of expected
+        color = "orange"
+    else:  # More than 3% off
+        color = "red"
+
+    st.write(f"<h2 style='color: {color}'>Breach Rate: {breach_rate:.2f}% (Expected: {expected_breach_rate:.1f}%)</h2>", unsafe_allow_html=True)
 
     prompt_fast = ChatPromptTemplate.from_template(
             """
@@ -200,6 +297,8 @@ if ticker:
     col2.metric("Daily VaR", f"{var:.2f}%")
     col3.metric("Expected Shortfall",f"{cvar:.2f}%")
     col4.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+
+
 
     # Drawdown Chart
     st.subheader("  Drawdown Chart")
